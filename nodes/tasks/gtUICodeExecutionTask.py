@@ -1,7 +1,8 @@
 import ast
+import json
 from typing import Any, Tuple
 
-from griptape.artifacts import BlobArtifact, TextArtifact
+from griptape.artifacts import BlobArtifact, TextArtifact, ErrorArtifact
 from griptape.tasks import CodeExecutionTask
 
 from ...py.griptape_settings import GriptapeSettings
@@ -196,65 +197,51 @@ output = clean_text(input)
 examples_keys_list = list(examples.keys())
 
 
-def build_CodeExecutionTask(code: str) -> CodeExecutionTask:
-    """
-    Takes Python code as a string and builds a CodeExecutionTask
-    that executes the provided code. The return value of the code is
-    automatically wrapped in an appropriate artifact.
-    """
+def build_CodeExecutionTask(code: str, num_outputs: int = 3) -> CodeExecutionTask:
     function_name = "dynamic_task"
-    exec_globals = {"TextArtifact": TextArtifact, "BlobArtifact": BlobArtifact}
+    exec_globals = {"TextArtifact": TextArtifact, "BlobArtifact": BlobArtifact, "json": json}
     exec_locals = {}
-
-    # Properly indent the user code to fit inside the function
     indented_code = "\n".join([f"    {line}" for line in code.splitlines()])
-
-    # Wrap the user's code with return type inference
+    
     wrapped_code = f"""
 def {function_name}(task):
-    # Map 'input' to 'task.input' for easier access
-    input = task.input.value
-
+    input_data = json.loads(task.input.value)
+    input_0 = input_data["input_0"]
+    input_1 = input_data["input_1"]
+    input_2 = input_data["input_2"]
 {indented_code}
-
-    # Convert the output to ensure consistent type handling
-    output = locals().get('output', None)
-    if output is None:
-        raise ValueError("User code must define an 'output' variable.")
-
-    # Determine artifact type based on the return value
-    if isinstance(output, str):
-        return TextArtifact(output)
-    else:
-        # Convert non-string outputs to string for TextArtifact
-        return TextArtifact(str(output)) if not isinstance(output, bytes) else BlobArtifact(output)
+    output_artifacts = []
+    for i in range({num_outputs}):
+        artifact = locals().get(f'output_{{i}}', '')
+        if isinstance(artifact, str):
+            output_artifacts.append(TextArtifact(artifact))
+        elif isinstance(artifact, bytes):
+            output_artifacts.append(BlobArtifact(artifact))
+        else:
+            output_artifacts.append(TextArtifact(str(artifact)))
+    return output_artifacts
 """
-    # Compile and execute the code
     exec(wrapped_code, exec_globals, exec_locals)
+    return CodeExecutionTask(on_run=exec_locals[function_name])
 
-    # Extract the dynamically created function
-    dynamic_function = exec_locals[function_name]
-
-    # Return a CodeExecutionTask that uses the dynamic function
-    return CodeExecutionTask(on_run=dynamic_function)
 
 
 class gtUICodeExecutionTask(gtUIBaseTask):
     DESCRIPTION = "Executes python code as a task.\nThe code takes the `input` from the task and should define an `output` variable that will be returned as the task's output."
     CATEGORY = "Griptape/Code"
-    OUTPUTS = ("STRING", "AGENT", "TASK")
+    OUTPUTS = ("STRING", "STRING", "STRING", "AGENT", "TASK")
 
     @classmethod
     def INPUT_TYPES(cls):
         inputs = super().INPUT_TYPES()
         inputs["required"].update(
             {
-                "input": (
+                "input_0": (
                     "STRING",
                     {
                         "multiline": False,
-                        "placeholder": "Text that will be passed as `input` to the code.",
-                        "default": "This text will be passed as `input` to the code.",
+                        "placeholder": "Input text #0 (required).",
+                        "default": "",
                     },
                 ),
             }
@@ -262,8 +249,25 @@ class gtUICodeExecutionTask(gtUIBaseTask):
         del inputs["required"]["STRING"]
         del inputs["optional"]["input_string"]
         del inputs["optional"]["key_value_replacement"]
+        
         inputs["optional"].update(
             {
+                "input_1": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "placeholder": "Input text #1 (optional).",
+                        "default": "",
+                    },
+                ),
+                "input_2": (
+                    "STRING",
+                    {
+                        "multiline": False,
+                        "placeholder": "Input text #2 (optional).",
+                        "default": "",
+                    },
+                ),
                 "examples": (
                     (),
                     {
@@ -274,23 +278,23 @@ class gtUICodeExecutionTask(gtUIBaseTask):
                 "code": (
                     "STRING",
                     {
-                        "placeholder": "Python code to execute. \n`input` is any input text.\n`output` will be returned as the task output.\n\noutput = input.upper()",
+                        "placeholder": "Python code to execute. \n`input` is any input text.\nDefine `output_0`, `output_1`, etc. for multiple outputs.\n\noutput_0 = input.upper()",
                         "default": """# Python code to execute.
 # `input` is any input text.
-# `output` will be returned as the task output
+# Define `output_0`, `output_1`, output_2. for multiple outputs
 
-output = input.upper()
+output_0 = input_0.upper()
+output_1 = input_1.lower()
+output_2 = input_2[::-1]
 """,
                         "multiline": True,
                         "tooltip": """Python code to execute. 
-The code should define an `output` variable that will be returned as the task's output.
+The code can define multiple inputs and output variables (output_0, output_1, etc.) that will be returned as the task's outputs.
 
 Example:
-# Sorts a list of numbers
-def sort_numbers(numbers):
-    return sorted(numbers)
-
-output = str(sort_numbers([int(x) for x in input.split(',')]))
+# Sorts and counts a list
+output_0 = sorted(input.split())
+output_1 = len(output_0)
 """,
                     },
                 ),
@@ -298,49 +302,55 @@ output = str(sort_numbers([int(x) for x in input.split(',')]))
         )
         inputs["hidden"] = {"unique_id": "UNIQUE_ID"}
         return inputs
+        
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("Output_0", "Output_1", "Output_2")
+    FUNCTION = "run"
+    CATEGORY = "Griptape/Code"
 
     def run(self, **kwargs) -> Tuple[Any, ...]:
-        STRING = kwargs.get("input")
-        # input_string = kwargs.get("input_string", None)
-        code = kwargs.get("code", None)
+        input_0 = kwargs.get("input_0", "")
+        input_1 = kwargs.get("input_1", "")
+        input_2 = kwargs.get("input_2", "")
+        code = kwargs.get("code", "")
         agent = kwargs.get("agent", None)
         settings = GriptapeSettings()
         code_execution = settings.get_settings_key("allow_code_execution")
-        code_execution_dangerous = settings.get_settings_key(
-            "allow_code_execution_dangerous"
-        )
-        # code_execution = kwargs.get("code_execution", False)
+        code_execution_dangerous = settings.get_settings_key("allow_code_execution_dangerous")
+
         if not code_execution:
-            return (
-                "❌ Code execution is disabled.\n\nTo enable it, please go to the Griptape Settings and turn on Enable Griptape Code: Run Python Nodes.",
-                None,
-                None,
-            )
+            return ("❌ Code execution is disabled.", "", "", None, None)
+
         if not agent:
             agent = Agent()
 
-        prompt = STRING
-
         if not code_execution_dangerous:
-            # Check the code for dangerous opoerations
             safe_code, response = check_script_for_danger(code)
-
             if not safe_code:
-                return (
-                    f"❌ Script contains dangerous operations. {response}",
-                    None,
-                    None,
-                )
+                return (f"❌ Dangerous code detected: {response}", "", "", None, None)
 
-        # Build the task
-        dynamic_task = build_CodeExecutionTask(code)
-        prev_task = agent.tasks[0]
+        dynamic_task = build_CodeExecutionTask(code, num_outputs=3)
+
+        # Serialize inputs to JSON string
+        input_dict = {"input_0": input_0, "input_1": input_1, "input_2": input_2}
+
         try:
             agent.add_task(dynamic_task)
-            result = agent.run(prompt)
-            value = result.output_task.output.value
-            agent.add_task(prev_task)
-            return (value, agent)
+            input_str = json.dumps(input_dict)
+            result = agent.run(input_str)
+            outputs = result.output_task.output
+            
+            if isinstance(outputs, ErrorArtifact):
+                return (f"❌ Task execution failed: {outputs.value}", "", "", None, None)
+
+
+            output_values = [artifact.value if artifact else "" for artifact in outputs]
+            while len(output_values) < 3:
+                output_values.append("")  # pad if needed
+
+            return (*output_values[:3], agent, None)
+
         except Exception as e:
-            return (str(e), None)
             print(e)
+            return (f"❌ Error: {str(e)}", "", "", None, None)
+
